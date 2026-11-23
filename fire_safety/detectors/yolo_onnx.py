@@ -159,6 +159,7 @@ class YoloOnnxDetector(BaseDetector):
 
     def _infer_net(self, sub: SingleYoloNet, img: np.ndarray,
                    conf_fire_override: Optional[float] = None,
+                   conf_smoke_override: Optional[float] = None,
                    source_tag: str = "model") -> List[Detection]:
         """Chay 1 mang YOLO ONNX tren anh (full frame hoac vung crop zoom) va tra ve detections."""
         h, w = img.shape[:2]
@@ -192,9 +193,10 @@ class YoloOnnxDetector(BaseDetector):
 
         dets: List[Detection] = []
         fire_thresh = c.conf_fire if conf_fire_override is None else conf_fire_override
+        smoke_thresh = c.conf_smoke if conf_smoke_override is None else conf_smoke_override
 
         for cls_id, label in sub.class_map.items():
-            conf_thresh = fire_thresh if label == FIRE else c.conf_smoke
+            conf_thresh = fire_thresh if label == FIRE else smoke_thresh
             col_idx = 4 + cls_id
             if col_idx >= out.shape[1]:
                 continue
@@ -440,6 +442,115 @@ class YoloOnnxDetector(BaseDetector):
             dark_dets.append(d)
         return dark_dets
 
+    @staticmethod
+    def _is_valid_zoom_smoke(frame: np.ndarray, hsv: np.ndarray,
+                             bbox: Tuple[int, int, int, int], crop_sz: int) -> bool:
+        """Xac thuc box khoi trong vung zoom: chan ao quan, tuong go, rem cua, mai nha
+        bang cach kiem tra do lech kenh mau (achromatic) va do bao hoa sac do."""
+        h, w = frame.shape[:2]
+        bx, by, bw, bh = bbox
+        if bw >= crop_sz * 0.70 or bh >= crop_sz * 0.70:
+            return False
+        x1, y1 = max(0, bx), max(0, by)
+        x2, y2 = min(w, bx + bw), min(h, by + bh)
+        if x2 <= x1 or y2 <= y1:
+            return False
+        roi = frame[y1:y2, x1:x2].astype(np.float32)
+        b, g, r = roi[:, :, 0], roi[:, :, 1], roi[:, :, 2]
+        max_cdiff = np.maximum(np.maximum(np.abs(r - g), np.abs(g - b)), np.abs(r - b))
+        if float(max_cdiff.mean()) > 8.5:
+            return False
+        s_sub = hsv[y1:y2, x1:x2, 1]
+        if float(s_sub.mean()) > 22.0:
+            return False
+        return True
+
+    def _detect_motion_zoom_smoke(self, frame: np.ndarray, hsv: np.ndarray,
+                                  ctx: FrameContext, p98: float) -> List[Detection]:
+        """Motion-ROI Zoom cho KHOI: phat hien cot khoi tu xa boc len tren mai nha / chan troi."""
+        if p98 > 8.5 or ctx.motion_mask is None:
+            return []
+
+        h, w = frame.shape[:2]
+        scale = ctx.scale if ctx.scale > 0 else 1.0
+        cnts, _ = cv2.findContours(ctx.motion_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        candidates = []
+        for c in cnts:
+            area = cv2.contourArea(c)
+            if area < 30:
+                continue
+            mx, my, mbw, mbh = cv2.boundingRect(c)
+            fx, fy = int(mx * scale), int(my * scale)
+            fbw, fbh = int(mbw * scale), int(mbh * scale)
+            if fy > h * 0.70:
+                continue
+            rx1, ry1 = max(0, fx), max(0, fy)
+            rx2, ry2 = min(w, fx + fbw), min(h, fy + fbh)
+            if rx2 <= rx1 or ry2 <= ry1:
+                continue
+            s_mean = float(hsv[ry1:ry2, rx1:rx2, 1].mean())
+            if s_mean <= 75.0:
+                candidates.append((fx + fbw // 2, fy + fbh // 2, area))
+
+        if not candidates:
+            return []
+
+        candidates.sort(key=lambda t: t[2], reverse=True)
+        zoom_dets: List[Detection] = []
+        zoom_conf = self.cfg.zoom_conf_smoke
+        for cx, cy, _ in candidates[:2]:
+            found_target = False
+            for sz in (300, 360):
+                if w < sz or h < sz:
+                    continue
+                x1 = max(0, min(w - sz, cx - sz // 2))
+                y1 = max(0, min(h - sz, cy - sz // 2))
+                crop = frame[y1:y1 + sz, x1:x1 + sz]
+                for sub in self.sub_models:
+                    for d in self._infer_net(sub, crop, conf_fire_override=99.0,
+                                             conf_smoke_override=zoom_conf, source_tag="model_zoom"):
+                        if d.label != SMOKE:
+                            continue
+                        full_box = (x1 + d.bbox[0], y1 + d.bbox[1], d.bbox[2], d.bbox[3])
+                        if not self._is_valid_zoom_smoke(frame, hsv, full_box, sz):
+                            continue
+                        zoom_dets.append(Detection(label=SMOKE, bbox=full_box, score=d.score, source="model_zoom"))
+                        found_target = True
+                if found_target:
+                    break
+        return zoom_dets
+
+    def _detect_tracked_zoom_smoke(self, frame: np.ndarray, hsv: np.ndarray,
+                                   ctx: FrameContext, p90: float) -> List[Detection]:
+        """Track-Guided Smoke Recovery: zoom quanh track khoi gan day khi mat dau tam thoi."""
+        if not ctx.recent_smoke_tracks or p90 > 7.5:
+            return []
+
+        h, w = frame.shape[:2]
+        zoom_dets: List[Detection] = []
+        zoom_conf = max(0.10, self.cfg.zoom_conf_smoke - 0.03)
+        for tx, ty, tbw, tbh in ctx.recent_smoke_tracks[:1]:
+            tcx, tcy = tx + tbw // 2, ty + tbh // 2
+            sz = 320
+            if w < sz or h < sz:
+                continue
+            x1 = max(0, min(w - sz, tcx - sz // 2))
+            y1 = max(0, min(h - sz, tcy - sz // 2))
+            crop = frame[y1:y1 + sz, x1:x1 + sz]
+            for sub in self.sub_models:
+                for d in self._infer_net(sub, crop, conf_fire_override=99.0,
+                                         conf_smoke_override=zoom_conf, source_tag="model_track_zoom"):
+                    if d.label != SMOKE:
+                        continue
+                    full_box = (x1 + d.bbox[0], y1 + d.bbox[1], d.bbox[2], d.bbox[3])
+                    if not self._is_valid_zoom_smoke(frame, hsv, full_box, sz):
+                        continue
+                    zoom_dets.append(Detection(label=SMOKE, bbox=full_box, score=d.score, source="model_track_zoom"))
+                    break
+            if zoom_dets:
+                break
+        return zoom_dets
+
     def detect(self, frame: np.ndarray, ctx: FrameContext) -> List[Detection]:
         c = self.cfg
         raw_dets: List[Detection] = []
@@ -448,31 +559,42 @@ class YoloOnnxDetector(BaseDetector):
             raw_dets.extend(self._infer_net(sub, frame))
 
         has_fire = any(d.label == FIRE for d in raw_dets)
-        if not has_fire:
+        has_smoke = any(d.label == SMOKE for d in raw_dets)
+
+        if (not has_fire or not has_smoke) and not ctx.scene_cut:
             hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-            has_smoke = ctx.has_active_smoke or any(d.label == SMOKE for d in raw_dets)
             if ctx.frame_diff is not None:
                 p90, p98 = [float(v) for v in np.percentile(ctx.frame_diff[::4, ::4], [90, 98])]
             else:
                 p90, p98 = 999.0, 999.0
 
-            extra_fire: List[Detection] = []
-            if has_smoke and ctx.frame_diff is not None and not ctx.scene_cut:
-                extra_fire = self._detect_text_occluded_fire(frame, hsv, ctx.frame_diff, p98)
+            if not has_fire:
+                smoke_active = ctx.has_active_smoke or has_smoke
+                extra_fire: List[Detection] = []
+                if smoke_active and ctx.frame_diff is not None:
+                    extra_fire = self._detect_text_occluded_fire(frame, hsv, ctx.frame_diff, p98)
 
-            if not extra_fire and ctx.frame_diff is not None and not ctx.scene_cut:
-                extra_fire = self._detect_motion_zoom_fire(frame, hsv, ctx.frame_diff, p98)
+                if not extra_fire and ctx.frame_diff is not None:
+                    extra_fire = self._detect_motion_zoom_fire(frame, hsv, ctx.frame_diff, p98)
 
-            if not extra_fire and ctx.frame_diff is not None and not ctx.scene_cut:
-                extra_fire = self._detect_tracked_zoom_fire(frame, hsv, ctx.frame_diff, p90, ctx.recent_fire_tracks)
+                if not extra_fire and ctx.frame_diff is not None:
+                    extra_fire = self._detect_tracked_zoom_fire(frame, hsv, ctx.frame_diff, p90, ctx.recent_fire_tracks)
 
-            if not extra_fire:
-                extra_fire = self._detect_dark_chamber_fire(frame, hsv, ctx.frame_diff)
+                if not extra_fire:
+                    extra_fire = self._detect_dark_chamber_fire(frame, hsv, ctx.frame_diff)
 
-            if not extra_fire and ctx.frame_diff is not None and not ctx.scene_cut:
-                extra_fire = self._verify_tracked_fire_glow(frame, hsv, p90, ctx.confirmed_fire_tracks)
+                if not extra_fire and ctx.frame_diff is not None:
+                    extra_fire = self._verify_tracked_fire_glow(frame, hsv, p90, ctx.confirmed_fire_tracks)
 
-            raw_dets.extend(extra_fire)
+                raw_dets.extend(extra_fire)
+
+            if not has_smoke:
+                extra_smoke: List[Detection] = []
+                if ctx.recent_smoke_tracks:
+                    extra_smoke = self._detect_tracked_zoom_smoke(frame, hsv, ctx, p90)
+                if not extra_smoke:
+                    extra_smoke = self._detect_motion_zoom_smoke(frame, hsv, ctx, p98)
+                raw_dets.extend(extra_smoke)
 
         # Class-wise NMS tong the sau khi gom tat ca detections
         final_dets: List[Detection] = []

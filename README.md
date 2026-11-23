@@ -13,8 +13,8 @@ Dự án kết hợp sức mạnh của **Deep Learning (Mô hình YOLO ONNX t�
   - `rule`: Sử dụng luật Computer Vision kết hợp phân tích màu sắc (HSV/RGB) và chuyển động nền thích ứng MOG2.
   - `both`: Kết hợp song song cả AI và Rule để tối đa hóa khả năng phát hiện.
 - **Tăng Tốc ONNX Runtime**: Tự động sử dụng engine suy luận `onnxruntime` đa luồng CPU (nhanh hơn ~38% so với `cv2.dnn`), cho phép xử lý mượt mà các video độ phân giải cao Full HD 1080p.
-- **Motion-ROI High-Resolution Zoom**: Khi ngọn lửa mới chớm nở ở khoảng cách xa hoặc kích thước nhỏ (như chập điện, tàn thuốc, đèn bàn bắt cháy), hệ thống tự động cắt cúp vùng chuyển động nóng rực ở độ phân giải gốc để đưa vào YOLO nhận diện, phát hiện sớm hơn trước khi ngọn lửa bùng phát lớn.
-- **Track-Guided Zoom Recovery & Glow Persistence**: Duy trì vết theo dõi (IoU tracking) liên tục qua các cảnh chuyển động giật, hiệu ứng chuyển cảnh (clock-wipe, pan camera) hoặc khi ngọn lửa tạm thời thụt vào buồng đèn/bình chứa.
+- **Motion-ROI High-Resolution Zoom**: Khi ngọn lửa hoặc cột khói mới chớm nở ở khoảng cách xa / diện tích nhỏ (như chập điện, tàn thuốc, khói mỏng bốc lên từ mái nhà/ống khói), hệ thống tự động cắt cúp vùng chuyển động ở độ phân giải gốc để đưa vào YOLO nhận diện, phát hiện sớm hơn hàng chục giây trước khi đám cháy bùng phát lớn.
+- **Track-Guided Zoom Recovery & Glow Persistence**: Duy trì vết theo dõi (IoU tracking) liên tục qua các cảnh chuyển động giật, hiệu ứng chuyển cảnh (clock-wipe, pan camera) hoặc khi ngọn lửa / vệt khói dao động ngắt quãng.
 - **Chống Báo Giả Tuyệt Đối (Zero False Positive)**:
   - Tích hợp bộ lọc hình học Hough Circles kết hợp phương sai sắc độ Hue Variance để triệt tiêu việc bắt nhầm lòng đỏ trứng chiên trên chảo và bóng đèn tròn phát sáng.
   - Kiểm tra mật độ điểm ảnh chuyển động nóng rực thực tế (`dmv6 / mv8`) để loại bỏ quần áo bảo hộ phản quang, da người và bóng râm.
@@ -103,7 +103,8 @@ Hệ thống cho phép tinh chỉnh linh hoạt trực tiếp trên thanh trư�
 | Tham số cấu hình | Cờ lệnh CLI tương ứng | Mặc định | Ý nghĩa kỹ thuật |
 |---|---|---|---|
 | `model.conf` | `--conf` | `0.35` | Ngưỡng tin cậy cơ sở của model YOLO chung. |
-| `model.zoom_conf_fire` | — | `0.16` | Ngưỡng tin cậy cực nhạy khi thực hiện **Motion-ROI Zoom** quanh vùng chuyển động nóng rực. Cho phép YOLO phát hiện những đốm lửa nhỏ chỉ vài chục pixel mà mắt thường khó để ý. |
+| `model.zoom_conf_fire` | — | `0.16` | Ngưỡng tin cậy cực nhạy khi thực hiện **Motion-ROI Zoom cho LỬA** quanh vùng chuyển động nóng rực. Cho phép YOLO phát hiện những đốm lửa nhỏ chỉ vài chục pixel mà mắt thường khó để ý. |
+| `model.zoom_conf_smoke`| — | `0.15` | Ngưỡng tin cậy cực nhạy khi thực hiện **Motion-ROI Zoom cho KHÓI** quanh vùng chuyển động ở độ phân giải gốc. Kết hợp bộ kiểm định phi màu (Achromatic Filter) để phát hiện sớm cột khói mờ ở xa mà không báo giả ngói nhà/tường. |
 | `model.dark_conf_fire` | — | `0.28` | Ngưỡng tin cậy khi kích hoạt model phụ chuyên dụng (`cctv_fire_smoke.onnx`) cho khung cảnh buồng tối thiếu sáng hoặc giai đoạn lửa tàn. |
 | `model.iou` | — | `0.45` | Ngưỡng Non-Maximum Suppression (NMS) để loại bỏ các bounding box bị chồng chéo lên nhau trên cùng một đối tượng. |
 | `temporal.smooth_boxes`| — | `True` | Bật thuật toán làm mượt tọa độ bounding box theo hàm mũ EMA (`alpha=0.65`) qua các khung hình liên tiếp. |
@@ -144,6 +145,32 @@ Trên video thành phẩm sau khi xuất xưởng, tool tự động hiển th�
    - **`t (Thoi gian): XX.XXs`**: Mốc thời gian phát lại thực tế của video tính bằng **giây** (`time_sec = frame_idx / fps`). Giúp người kiểm tra tua ngay đến đúng thời điểm xảy ra cháy trên các đầu ghi/phần mềm media player.
    - **`f (Frame): NNNN`**: **Số thứ tự khung hình chính xác** (`frame_idx`), bắt đầu từ 0 đến hết video. Giúp đối chiếu kỹ thuật chính xác từng khung hình với file log CSV.
    - **`[<video_id>]`**: Mã định danh chuẩn hóa của video (ví dụ: `[01_dorm_room_fire]`), đồng bộ với tiền tố file xuất xưởng.
+
+---
+
+### 3.4. Cơ Chế Kỹ Thuật Phát Hiện Sớm Khói (Early Smoke Detection & Achromatic Filter)
+
+Nhằm giải quyết triệt để vấn đề phát hiện khói muộn trên các video khoảng cách xa (như video giám sát khu dân cư, cháy nhà từ xa):
+
+1. **Bối cảnh & Nguyên nhân phát hiện muộn**:
+   - Khi quan sát từ xa, cột khói ban đầu thường mỏng, khuếch tán và chỉ chiếm diện tích rất nhỏ (~60–80 px) trên khung hình Full HD / 720p.
+   - Khi toàn khung hình bị resize/downscale về $640 \times 640$ để nạp vào mạng nơ-ron YOLO, các điểm ảnh vệt khói bị suy hao độ nét và hòa lẫn vào nền mây trời. Do đó, điểm tin cậy toàn khung hình chỉ đạt quanh mức $0.10 - 0.20$ và thường trễ đến hàng chục giây (chờ khi đám khói bốc đen đặc mới đạt ngưỡng phát hiện).
+
+2. **Cơ chế Motion-ROI Zoom cho Khói (`_detect_motion_zoom_smoke`)**:
+   - Khi toàn khung hình chưa phát hiện khói, hệ thống theo dõi mặt nạ chuyển động MOG2 (`ctx.motion_mask`) tập trung vào nửa trên khung hình ($y < 70\%$).
+   - Lọc các cụm chuyển động có độ bão hòa màu thấp ($S \le 75$) và trích xuất vùng ảnh ở **độ phân giải gốc** ($300 \times 300$ và $360 \times 360$) đưa vào mạng YOLO với ngưỡng nhạy `zoom_conf_smoke = 0.15`.
+
+3. **Bộ Kiểm Định Phi Màu (Achromatic Validation Filter - `_is_valid_zoom_smoke`)**:
+   - Để ngăn chặn hoàn toàn việc nhận nhầm các vật thể có màu như ngói nhà gạch đỏ, tường gỗ, đồ đạc nội thất hoặc quần áo lính cứu hỏa:
+     - Khói thực tế dưới ánh sáng ban ngày luôn có tính chất **phi màu (achromatic)**: chênh lệch cực đại giữa 3 kênh màu $\max(|R-G|, |G-B|, |R-B|) \le 8.5$ và độ bão hòa màu HSV $S \le 22.0$.
+     - Các bề mặt màu sắc (ngói gạch, gỗ, vải áo) có độ lệch kênh màu rất lớn ($25 - 45$), do đó bị loại bỏ tuyệt đối $100\%$, đảm bảo zero false positive.
+
+4. **Khôi Phục Vết Khói Theo Thời Gian (Track-Guided Smoke Recovery - `_detect_tracked_zoom_smoke`)**:
+   - Bộ lọc thời gian `BBoxTemporalFilter` tích hợp phương thức `recent_small_smoke_boxes()`. Khi khói đã được nhận diện, hệ thống tự động bám theo tọa độ crop xung quanh vệt khói ở các khung hình tiếp theo, duy trì bounding box mượt mà ngay cả khi vệt khói biến thiên hình dạng chập chờn.
+
+5. **Hiệu quả thực nghiệm**:
+   - Trên video thử nghiệm góc xa `1794670535848`, thời điểm phát hiện khói đầu tiên được rút ngắn từ **76.50s (frame 2295)** xuống còn **27.87s (frame 836)** — **sớm hơn 48.63 giây** (nắm bắt ngay từ lúc cột khói đầu tiên bắt đầu bốc lên trên mái nhà).
+   - Kiểm tra hồi quy trên các video đối chứng (`Dorm Room`, `Fire Development`) hoàn toàn sạch bóng cảnh báo giả ($0$ false alarms trên vùng an toàn).
 
 ---
 

@@ -2,7 +2,7 @@ from typing import List, Tuple
 import numpy as np
 
 from ..config import TemporalConfig
-from .types import FIRE, Detection
+from .types import FIRE, SMOKE, Detection
 
 
 class TemporalMaskFilter:
@@ -93,6 +93,17 @@ class BBoxTemporalFilter:
         cands = [
             t for t in self.tracks
             if t.label == FIRE and t.hits >= 2
+            and t.time_since_update <= max_age and t.model_gap <= 26
+            and (t.bbox[2] * t.bbox[3] <= max_area)
+        ]
+        cands.sort(key=lambda t: t.hits, reverse=True)
+        return tuple((int(t.bbox[0]), int(t.bbox[1]), int(t.bbox[2]), int(t.bbox[3])) for t in cands)
+
+    def recent_small_smoke_boxes(self, max_area: int = 150000, max_age: int = 12) -> Tuple[Tuple[int, int, int, int], ...]:
+        """Tra ve cac box khoi dang hoat dong gan day (uu tien hits cao) de zoom kiem tra lai khi miss."""
+        cands = [
+            t for t in self.tracks
+            if t.label == SMOKE and t.hits >= 2
             and t.time_since_update <= max_age and t.model_gap <= 26
             and (t.bbox[2] * t.bbox[3] <= max_area)
         ]

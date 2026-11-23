@@ -51,6 +51,7 @@ class ModelConfig:
     conf_fire: float = 0.38          # nguong rieng cho LUA DO: triet tieu tuyet doi mat nguoi, ao quan, trung chien
     conf_smoke: float = 0.25         # nguong rieng cho KHOI
     zoom_conf_fire: float = 0.16     # nguong LUA khi zoom can canh vung chuyen dong (Motion-ROI Zoom)
+    zoom_conf_smoke: float = 0.15    # nguong KHOI khi zoom can canh vung chuyen dong (Motion-ROI Zoom)
     dark_conf_fire: float = 0.28     # nguong LUA cho canh toi / giai doan tan
     iou: float = 0.45
     class_names: Tuple[str, ...] = ("fire", "smoke")

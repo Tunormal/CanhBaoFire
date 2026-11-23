@@ -63,8 +63,10 @@ class DetectionPipeline:
         ctx = FrameContext(
             motion_mask=motion_mask,
             frame_diff=frame_diff,
+            scale=scale,
             recent_fire_tracks=() if scene_cut else self.temporal_filter.recent_small_fire_boxes(),
             confirmed_fire_tracks=() if scene_cut else self.temporal_filter.confirmed_fire_boxes(),
+            recent_smoke_tracks=() if scene_cut else self.temporal_filter.recent_small_smoke_boxes(),
             has_active_smoke=False if scene_cut else self.temporal_filter.has_active_label(SMOKE, max_age=3),
             scene_cut=scene_cut,
         )
